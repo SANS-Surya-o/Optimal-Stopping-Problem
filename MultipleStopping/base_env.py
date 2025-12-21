@@ -35,8 +35,23 @@ class BaseStoppingEnv(gym.Env, ABC):
             n_states: Number of discrete offer states
             max_time: Maximum time horizon
             max_stops: Maximum number of stops allowed
-            transition_model: Type of stochastic process ('random_walk', 'brownian', 'iid', 'iid_gaussian')
-            transition_params: Parameters for transition model
+            transition_model: Type of stochastic process. Options:
+                - 'iid': IID uniform or custom distribution
+                - 'iid_gaussian': IID Gaussian distribution
+                - 'iid_geometric': IID Geometric distribution
+                - 'iid_poisson': IID Poisson distribution
+                - 'iid_exponential': IID Exponential distribution (discretized)
+                - 'iid_binomial': IID Binomial distribution
+                - 'random_walk': Random walk with configurable probabilities
+                - 'brownian': Discrete Brownian motion
+            transition_params: Parameters for transition model. Examples:
+                - iid_gaussian: {'mean': 5.0, 'std': 2.0}
+                - iid_geometric: {'p': 0.3}
+                - iid_poisson: {'lambda': 3.0}
+                - iid_exponential: {'rate': 1.0}
+                - iid_binomial: {'n': 10, 'p': 0.5}
+                - random_walk: {'p_up': 0.5, 'p_down': 0.5}
+                - brownian: {'mu': 0.0, 'sigma': 1.0}
             seed: Random seed for reproducibility
         """
         super().__init__()
@@ -77,6 +92,14 @@ class BaseStoppingEnv(gym.Env, ABC):
             self.P = self._create_iid_gaussian_transition()
         elif self.transition_model == 'iid':
             self.P = self._create_iid_transition()
+        elif self.transition_model == 'iid_geometric':
+            self.P = self._create_iid_geometric_transition()
+        elif self.transition_model == 'iid_poisson':
+            self.P = self._create_iid_poisson_transition()
+        elif self.transition_model == 'iid_exponential':
+            self.P = self._create_iid_exponential_transition()
+        elif self.transition_model == 'iid_binomial':
+            self.P = self._create_iid_binomial_transition()
         elif self.transition_model == 'random_walk':
             self.P = self._create_random_walk_transition()
         elif self.transition_model == 'brownian':
@@ -117,12 +140,110 @@ class BaseStoppingEnv(gym.Env, ABC):
             P = np.tile(prob, (self.n_states, 1))
         return P
     
+    def _create_iid_geometric_transition(self) -> np.ndarray:
+        """
+        Create IID Geometric transition matrix.
+        Geometric distribution: P(X=k) = (1-p)^(k-1) * p for k = 0, 1, 2, ...
+        """
+        p = self.transition_params.get('p', 0.3)  # Success probability
+        
+        # Create geometric probability distribution over states
+        probs = np.zeros(self.n_states)
+        for i in range(self.n_states):
+            probs[i] = ((1 - p) ** i) * p
+        
+        # Normalize to ensure sum = 1 (for finite support)
+        probs /= probs.sum()
+        
+        # IID: same distribution from every state
+        P = np.tile(probs, (self.n_states, 1))
+        
+        return P
+    
+    def _create_iid_poisson_transition(self) -> np.ndarray:
+        """
+        Create IID Poisson transition matrix.
+        Poisson distribution: P(X=k) = (lambda^k * e^(-lambda)) / k!
+        """
+        lam = self.transition_params.get('lambda', self.n_states / 3.0)  # Rate parameter
+        
+        # Create Poisson probability distribution over states
+        probs = np.zeros(self.n_states)
+        for i in range(self.n_states):
+            # Compute Poisson PMF
+            if i == 0:
+                probs[i] = np.exp(-lam)
+            else:
+                # Use log to avoid overflow: log(k!) = sum(log(j)) for j=1 to k
+                log_factorial = np.sum(np.log(np.arange(1, i + 1)))
+                probs[i] = np.exp(i * np.log(lam) - lam - log_factorial)
+        
+        # Normalize to ensure sum = 1 (for finite support)
+        probs /= probs.sum()
+        
+        # IID: same distribution from every state
+        P = np.tile(probs, (self.n_states, 1))
+        
+        return P
+    
+    def _create_iid_exponential_transition(self) -> np.ndarray:
+        """
+        Create IID Exponential transition matrix (discretized).
+        Exponential distribution discretized over states.
+        """
+        rate = self.transition_params.get('rate', 1.0)  # Rate parameter (lambda)
+        
+        # Create discretized exponential distribution
+        # For discrete states 0, 1, 2, ..., n_states-1
+        # We use the CDF: F(k) = 1 - e^(-rate * k)
+        # PMF: P(X=k) = F(k+1) - F(k)
+        probs = np.zeros(self.n_states)
+        for i in range(self.n_states):
+            if i == self.n_states - 1:
+                # Last state gets remaining probability
+                probs[i] = np.exp(-rate * i)
+            else:
+                probs[i] = np.exp(-rate * i) - np.exp(-rate * (i + 1))
+        
+        # Normalize (should already be normalized, but for safety)
+        probs /= probs.sum()
+        
+        # IID: same distribution from every state
+        P = np.tile(probs, (self.n_states, 1))
+        
+        return P
+    
+    def _create_iid_binomial_transition(self) -> np.ndarray:
+        """
+        Create IID Binomial transition matrix.
+        Binomial distribution: P(X=k) = C(n,k) * p^k * (1-p)^(n-k)
+        """
+        n_trials = self.transition_params.get('n', self.n_states - 1)  # Number of trials
+        p = self.transition_params.get('p', 0.5)  # Success probability
+        
+        # Create binomial probability distribution over states
+        probs = np.zeros(self.n_states)
+        
+        from scipy.special import comb
+        
+        for i in range(min(self.n_states, n_trials + 1)):
+            # Binomial PMF
+            probs[i] = comb(n_trials, i, exact=True) * (p ** i) * ((1 - p) ** (n_trials - i))
+        
+        # Normalize to ensure sum = 1
+        probs /= probs.sum()
+        
+        # IID: same distribution from every state
+        P = np.tile(probs, (self.n_states, 1))
+        
+        return P
+    
     def _create_random_walk_transition(self) -> np.ndarray:
         """Create random walk transition matrix."""
         # extract up and down probs from params
         p_up = self.transition_params.get('p_up', 0.5)
         p_down = self.transition_params.get('p_down', 0.5)
-        p_stay = 1.0 - p_up - p_down
+        p_stay = max(1 - p_up - p_down,0)
 
         P = np.zeros((self.n_states, self.n_states))
         for i in range(self.n_states):

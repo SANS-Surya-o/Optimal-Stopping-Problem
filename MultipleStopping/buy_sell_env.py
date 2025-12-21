@@ -67,7 +67,7 @@ class BuySellEnv(BaseStoppingEnv):
         # Map state indices to actual offer values
         if offer_values is None:
             # Default: linearly spaced values between 0 and n_states
-            self.offer_values = np.linspace(0, n_states, n_states)
+            self.offer_values = np.linspace(0, n_states-1, n_states)
         else:
             assert len(offer_values) == n_states, \
                 f"offer_values must have length {n_states}"
@@ -229,8 +229,6 @@ class BuySellEnv(BaseStoppingEnv):
         # stops_left = 1: Must sell now (last chance)
         V[:, 1, 1] = self.offer_values  # Receive sell price
         policy[:, 1, 1] = 1
-
-        policy[0,1,1] = 0 # for aesthetics on plots, no difference in value
         
         # stops_left = 2: Can't complete buy-sell in 1 step, so don't buy
         V[:, 1, 2] = 0  # Impossible to complete profitably
@@ -250,7 +248,7 @@ class BuySellEnv(BaseStoppingEnv):
                 # Reject: Pay holding cost and continue
                 value_reject = -cost + np.dot(P[s, :], V[:, t-1, 1])
                 
-                if value_accept >= value_reject:
+                if value_accept > value_reject:
                     V[s, t, 1] = value_accept
                     policy[s, t, 1] = 1
                 else:
@@ -265,7 +263,7 @@ class BuySellEnv(BaseStoppingEnv):
                 # Reject: Don't buy, no cost, continue with stops_left=2
                 value_reject = np.dot(P[s, :], V[:, t-1, 2])
                 
-                if value_accept > value_reject:
+                if value_accept >= value_reject:
                     V[s, t, 2] = value_accept
                     policy[s, t, 2] = 1
                 else:

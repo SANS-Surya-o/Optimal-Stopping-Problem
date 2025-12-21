@@ -91,9 +91,15 @@ class QLearningAgent:
         else:
             # Initialize Q-table
             self.Q = np.zeros((n_states, max_time + 1, max_stops + 1, n_actions))
+        
+        # Initialize Q-values for accept action if environment provides offer_values
+        if env is not None and hasattr(env, 'offer_values'):
+            for s in range(n_states):
+                for t in range(max_time + 1):
+                    self.Q[s, t, 1, 1] = env.offer_values[s]
 
         # Visit counts for diagnostics
-        self.visit_counts = np.zeros((n_states, max_time + 1, max_stops + 1))
+        self.visit_counts = np.zeros((n_states, max_time + 1, max_stops + 1, n_actions), dtype=int)
         
         # Training statistics
         self.episode_rewards = []
@@ -183,10 +189,11 @@ class QLearningAgent:
         self.Q[state][action] += alpha * td_error
         
         # Update visit count
-        self.visit_counts[state] += 1
-        
+        self.visit_counts[state][action] += 1
+
         return abs(td_error)
-    
+
+
     def train_episode(
         self,
         env,
@@ -244,7 +251,7 @@ class QLearningAgent:
             episode_length += 1
             
             obs = next_obs
-        
+
         # Store statistics
         self.episode_rewards.append(episode_reward)
         self.episode_lengths.append(episode_length)
@@ -461,6 +468,580 @@ class QLearningAgent:
             Policy array of shape (n_states, max_time+1, max_stops+1)
         """
         return np.argmax(self.Q, axis=- 1)
+    
+class QLearningAgentVanilla(QLearningAgent):
+    """
+    Just a placeholder for a vanilla Q-learning agent.
+    DIfferent name, same functionality as QLearningAgent.
+    """
+    pass
+
+class QLearningAgentConstraint(QLearningAgent):
+    """
+    Q-Learning agent with monotonicity constraint in time.
+    
+    Enforces Q(s, t1, n, a) >= Q(s, t2, n, a) when t1 > t2
+    (having more time left should be at least as valuable)
+    
+    After each episode, Q-values are adjusted to satisfy this constraint
+    by propagating the maximum Q-value seen so far as time increases.
+    """
+    
+    def _apply_monotonicity_constraint(self):
+        """
+        Apply monotonicity constraint: Q-values should be non-decreasing in time_left.
+        For each (state, stops_left, action), ensure Q values increase with time_left.
+        """
+        for s in range(self.n_states):
+            for n in range(self.max_stops + 1):
+                for a in range(self.n_actions):
+                    max_so_far = -np.inf
+                    for t in range(self.max_time + 1):
+                        max_so_far = max(max_so_far, self.Q[s, t, n, a])
+                        if self.Q[s, t, n, a] < max_so_far:
+                            self.Q[s, t, n, a] = max_so_far
+    
+    def train_episode(
+        self,
+        env,
+        episode_num: int,
+        callbacks: Optional[List[Callable]] = None
+    ) -> Dict[str, Any]:
+        """
+        Train for one episode with monotonicity constraint applied after updates.
+        """
+        # Call parent's train_episode logic
+        # Update hyperparameters if schedules are provided
+        if self.alpha_schedule is not None:
+            current_alpha = self.alpha_schedule(episode_num)
+        else:
+            current_alpha = self.alpha
+        
+        if self.epsilon_schedule is not None:
+            current_epsilon = self.epsilon_schedule(episode_num)
+        else:
+            current_epsilon = self.epsilon
+        
+        # Reset environment
+        obs, info = env.reset()
+        
+        episode_reward = 0.0
+        episode_length = 0
+        td_errors = []
+        
+        terminated = False
+        truncated = False
+        
+        while not (terminated or truncated):
+            # Select action
+            action = self.select_action(obs, epsilon=current_epsilon)
+            
+            # Take step
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            
+            # Update Q-value
+            td_error = self.update(
+                obs, action, reward, next_obs,
+                terminated or truncated,
+                alpha=current_alpha
+            )
+            
+            td_errors.append(td_error)
+            episode_reward += reward
+            episode_length += 1
+            
+            obs = next_obs
+
+        # Store statistics
+        self.episode_rewards.append(episode_reward)
+        self.episode_lengths.append(episode_length)
+        self.training_losses.append(np.mean(td_errors))
+
+        # Apply monotonicity constraint after episode
+        self._apply_monotonicity_constraint()
+        
+        # Execute callbacks
+        if callbacks is not None:
+            for callback in callbacks:
+                callback(self, env, episode_num, {
+                    'episode_reward': episode_reward,
+                    'episode_length': episode_length,
+                    'td_error': np.mean(td_errors),
+                    'alpha': current_alpha,
+                    'epsilon': current_epsilon
+                })
+        
+        return {
+            'episode_reward': episode_reward,
+            'episode_length': episode_length,
+            'mean_td_error': np.mean(td_errors),
+            'alpha': current_alpha,
+            'epsilon': current_epsilon
+        }
+
+
+from collections import deque
+import numpy as np
+from typing import Optional, List, Callable, Dict, Any
+
+# -----------------------------------------------------------
+# 1. Off-Policy Weighted Importance Sampling (WIS) Agent
+#    - Good for off-policy learning.
+#    - Uses Importance Sampling ratios to correct for exploration.
+#    - Uses 'C' table to stabilize variance (bias removal).
+#    - RISK: "Trace Cutting" (updates become 0 if exploration happens deep in the trace).
+# -----------------------------------------------------------
+
+class OffPolicyWISAgent(QLearningAgent):
+    """
+    Q-Learning agent using n-step returns with Weighted Importance Sampling (WIS).
+    """
+    
+    def __init__(self, n_step: int = 3, **kwargs):
+        super().__init__(**kwargs)
+        self.n_step = n_step
+        # C-table for Weighted Importance Sampling (accumulated weights)
+        self.C = np.zeros_like(self.Q) 
+
+    def get_behavior_prob(self, action: int, best_action: int, epsilon: float) -> float:
+        """Calculate probability of taking 'action' under epsilon-greedy policy."""
+        if action == best_action:
+            return (1.0 - epsilon) + (epsilon / self.n_actions)
+        else:
+            return epsilon / self.n_actions
+
+    def _compute_wis_return(self, buffer, final_next_obs, terminated):
+        """Computes n-step return G and importance sampling ratio rho."""
+        rho = 1.0
+        
+        # Bootstrap with Greedy Target Policy (max Q)
+        if terminated:
+            G = 0.0
+        else:
+            G = self.get_max_q_value(final_next_obs)
+        
+        # Iterate backwards to compute n-step return and importance ratio
+        for i in reversed(range(len(buffer))):
+            obs, action, reward, mu_prob = buffer[i]
+            G = reward + self.gamma * G
+            
+            # Target policy is deterministic greedy
+            greedy_action = self.get_best_action(obs)
+            pi_prob = 1.0 if action == greedy_action else 0.0
+                
+            ratio = pi_prob / mu_prob
+            rho *= ratio
+            
+            if rho == 0.0:  # Trace cut by non-greedy action
+                break
+                
+        return G, rho
+
+    def update_wis(self, obs, action, G, rho):
+        """Apply Weighted Importance Sampling update rule."""
+        if rho == 0.0: return 0.0
+            
+        state = self.get_state_tuple(obs)
+        self.C[state][action] += rho
+        
+        current_q = self.Q[state][action]
+        td_error = G - current_q
+        
+        # Effective alpha is rho / C
+        learning_rate = rho / self.C[state][action]
+        self.Q[state][action] += learning_rate * td_error
+
+        self.visit_counts[state][action] += 1
+        return abs(td_error)
+
+    def train_episode(self, env, episode_num: int, callbacks: Optional[List[Callable]] = None) -> Dict[str, Any]:
+        # Update schedules
+        curr_alpha = self.alpha_schedule(episode_num) if self.alpha_schedule else self.alpha
+        curr_eps = self.epsilon_schedule(episode_num) if self.epsilon_schedule else self.epsilon
+            
+        obs, info = env.reset()
+        episode_reward = 0.0
+        episode_length = 0
+        td_errors = []
+        buffer = deque(maxlen=self.n_step)
+        
+        terminated = False
+        truncated = False
+        
+        while not (terminated or truncated):
+            best_action = self.get_best_action(obs)
+            action = self.select_action(obs, epsilon=curr_eps)
+            mu_prob = self.get_behavior_prob(action, best_action, curr_eps)
+            
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            buffer.append((obs, action, reward, mu_prob))
+            
+            if len(buffer) == self.n_step:
+                # Update oldest state in buffer
+                upd_obs, upd_act, _, _ = buffer[0]
+                G, rho = self._compute_wis_return(list(buffer), next_obs, terminated or truncated)
+                err = self.update_wis(upd_obs, upd_act, G, rho)
+                td_errors.append(err)
+
+            episode_reward += reward
+            episode_length += 1
+            obs = next_obs
+            
+        # Flush buffer
+        while len(buffer) > 0:
+            upd_obs, upd_act, _, _ = buffer[0]
+            G, rho = self._compute_wis_return(list(buffer), None, True)
+            err = self.update_wis(upd_obs, upd_act, G, rho)
+            td_errors.append(err)
+            buffer.popleft()
+
+        self._log_episode(episode_reward, episode_length, td_errors) # Helper to log stats
+        return self._make_stats_dict(episode_reward, episode_length, td_errors, curr_alpha, curr_eps)
+
+    def _log_episode(self, r, l, errs):
+        self.episode_rewards.append(r)
+        self.episode_lengths.append(l)
+        self.training_losses.append(np.mean(errs) if errs else 0.0)
+
+    def _make_stats_dict(self, r, l, errs, alpha, eps):
+         return {
+            'episode_reward': r,
+            'mean_td_error': np.mean(errs) if errs else 0.0,
+            'epsilon': eps,
+            'alpha': alpha
+        }
+
+
+# -----------------------------------------------------------
+# 2. Tree Backup Agent
+#    - THE RECOMMENDED APPROACH.
+#    - Robust to off-policy exploration without trace cutting.
+#    - Dynamically shortens lookahead when non-greedy actions occur.
+# -----------------------------------------------------------
+
+class TreeBackupAgent(QLearningAgent):
+    """
+    Q-Learning agent using n-step Tree Backup algorithm.
+    """
+    
+    def __init__(self, n_step: int = 3, **kwargs):
+        super().__init__(**kwargs)
+        self.n_step = n_step
+
+    def _compute_tree_backup_return(self, buffer, final_next_obs, terminated):
+        """
+        Computes the recursive Tree Backup return G.
+        """
+        # 1. Start with the value at the horizon (t+n)
+        if terminated:
+            G = 0.0
+        else:
+            G = self.get_max_q_value(final_next_obs)
+            
+        # 2. Iterate backwards from t+n-1 down to t
+        for i in reversed(range(len(buffer))):
+            obs, action, reward, _ = buffer[i]
+            
+            # Identify the greedy action for this state
+            greedy_action = self.get_best_action(obs)
+            
+            if action == greedy_action:
+                # Case A: We took the greedy action.
+                # The tree continues deeper. Add reward and discount existing G.
+                G = reward + self.gamma * G
+            else:
+                # Case B: We took an exploratory action.
+                # Cut the deep trace and bootstrap from the *next* state.
+                
+                # Determine value of S_{t+1}
+                if i == len(buffer) - 1:
+                    # The next state is outside the buffer
+                    if terminated:
+                        next_val = 0.0
+                    else:
+                        # SAFEGUARD: Ensure final_next_obs is not None before using
+                        next_val = self.get_max_q_value(final_next_obs) if final_next_obs is not None else 0.0
+                else:
+                    # The next state is the next item in the buffer
+                    next_obs_in_buffer = buffer[i+1][0]
+                    next_val = self.get_max_q_value(next_obs_in_buffer)
+                
+                G = reward + self.gamma * next_val
+                
+        return G
+
+    def update_standard(self, obs, action, G, alpha):
+        """Standard Q-learning update using the calculated Return G."""
+        state = self.get_state_tuple(obs)
+        current_q = self.Q[state][action]
+        td_error = G - current_q
+        
+        self.Q[state][action] += alpha * td_error
+        self.visit_counts[state][action] += 1
+        return abs(td_error)
+
+    def train_episode(self, env, episode_num: int, callbacks: Optional[List[Callable]] = None) -> Dict[str, Any]:
+        curr_alpha = self.alpha_schedule(episode_num) if self.alpha_schedule else self.alpha
+        curr_eps = self.epsilon_schedule(episode_num) if self.epsilon_schedule else self.epsilon
+            
+        obs, info = env.reset()
+        episode_reward = 0.0
+        episode_length = 0
+        td_errors = []
+        buffer = deque(maxlen=self.n_step)
+        
+        terminated = False
+        truncated = False
+        
+        while not (terminated or truncated):
+            action = self.select_action(obs, epsilon=curr_eps)
+            
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            # Tree Backup doesn't need mu_prob, storing 0.0
+            buffer.append((obs, action, reward, 0.0))
+            
+            if len(buffer) == self.n_step:
+                upd_obs, upd_act, _, _ = buffer[0]
+                G = self._compute_tree_backup_return(list(buffer), next_obs, terminated or truncated)
+                err = self.update_standard(upd_obs, upd_act, G, curr_alpha)
+                td_errors.append(err)
+
+            episode_reward += reward
+            episode_length += 1
+            obs = next_obs
+            
+        # Flush buffer
+        while len(buffer) > 0:
+            upd_obs, upd_act, _, _ = buffer[0]
+            # Passing None for final_next_obs because we are flushing at terminal state
+            # The safeguards in _compute_tree_backup_return handle this.
+            G = self._compute_tree_backup_return(list(buffer), None, True)
+            err = self.update_standard(upd_obs, upd_act, G, curr_alpha)
+            td_errors.append(err)
+            buffer.popleft()
+
+        # Log stats
+        self.episode_rewards.append(episode_reward)
+        self.episode_lengths.append(episode_length)
+        mean_loss = np.mean(td_errors) if td_errors else 0.0
+        self.training_losses.append(mean_loss)
+        
+        return {
+            'episode_reward': episode_reward,
+            'mean_td_error': mean_loss,
+            'epsilon': curr_eps,
+            'alpha': curr_alpha
+        }
+
+
+class DoubleQLearningAgent(QLearningAgent):
+    """
+    Double Q-Learning agent to overcome overestimation bias.
+    
+    Double Q-Learning maintains two separate Q-value estimates (Q1 and Q2) and randomly
+    selects which one to update at each step. When updating, it uses one Q-table to 
+    select the best action and the other Q-table to evaluate that action. This 
+    decoupling reduces the overestimation bias inherent in standard Q-learning.
+    
+    Reference: van Hasselt, H. (2010). Double Q-learning. NeurIPS.
+    """
+    
+    def __init__(
+        self,
+        n_states: Optional[int] = None,
+        n_actions: Optional[int] = None,
+        max_time: Optional[int] = None,
+        max_stops: Optional[int] = None,
+        env = None,
+        Q_init: Optional[np.ndarray] = None,
+        alpha: float = 0.1,
+        gamma: float = 0.99,
+        epsilon: float = 0.1,
+        alpha_schedule: Optional[Callable[[int], float]] = None,
+        epsilon_schedule: Optional[Callable[[int], float]] = None,
+        seed: Optional[int] = None
+    ):
+        """
+        Initialize Double Q-Learning agent.
+        
+        Args:
+            n_states: Number of offer states (extracted from env if not provided)
+            n_actions: Number of actions (extracted from env if not provided)
+            max_time: Maximum time horizon (extracted from env if not provided)
+            max_stops: Maximum number of stops (extracted from env if not provided)
+            env: Environment instance to extract parameters from
+            Q_init: Optional initial Q-table (used to initialize both Q1 and Q2)
+            alpha: Initial learning rate
+            gamma: Discount factor
+            epsilon: Initial exploration rate
+            alpha_schedule: Function(episode) -> alpha for time-varying learning rate
+            epsilon_schedule: Function(episode) -> epsilon for time-varying exploration
+            seed: Random seed
+        """
+        # Initialize parent class
+        super().__init__(
+            n_states=n_states,
+            n_actions=n_actions,
+            max_time=max_time,
+            max_stops=max_stops,
+            env=env,
+            Q_init=Q_init,
+            alpha=alpha,
+            gamma=gamma,
+            epsilon=epsilon,
+            alpha_schedule=alpha_schedule,
+            epsilon_schedule=epsilon_schedule,
+            seed=seed
+        )
+        
+        # Rename parent Q-table to Q1
+        self.Q1 = self.Q
+        
+        # Initialize second Q-table (Q2)
+        if Q_init is not None:
+            self.Q2 = Q_init.copy()
+        else:
+            self.Q2 = np.zeros((self.n_states, self.max_time + 1, self.max_stops + 1, self.n_actions))
+        
+        # Initialize Q2-values for accept action if environment provides offer_values
+        if env is not None and hasattr(env, 'offer_values'):
+            for s in range(self.n_states):
+                for t in range(self.max_time + 1):
+                    self.Q2[s, t, 1, 1] = env.offer_values[s]
+        
+        # Visit counts for Q1 and Q2 (for diagnostics)
+        self.visit_counts_q1 = np.zeros((self.n_states, self.max_time + 1, self.max_stops + 1, self.n_actions), dtype=int)
+        self.visit_counts_q2 = np.zeros((self.n_states, self.max_time + 1, self.max_stops + 1, self.n_actions), dtype=int)
+        
+    def get_q_value(self, obs: Dict[str, int], action: int) -> float:
+        """Get average Q-value for state-action pair from both Q-tables."""
+        state = self.get_state_tuple(obs)
+        return (self.Q1[state][action] + self.Q2[state][action]) / 2.0
+    
+    def get_max_q_value(self, obs: Dict[str, int]) -> float:
+        """Get maximum average Q-value for a state."""
+        state = self.get_state_tuple(obs)
+        avg_q = (self.Q1[state] + self.Q2[state]) / 2.0
+        return np.max(avg_q)
+    
+    def get_best_action(self, obs: Dict[str, int]) -> int:
+        """Get greedy action based on average Q-values from both tables."""
+        state = self.get_state_tuple(obs)
+        avg_q = (self.Q1[state] + self.Q2[state]) / 2.0
+        return np.argmax(avg_q)
+    
+    def update(
+        self,
+        obs: Dict[str, int],
+        action: int,
+        reward: float,
+        next_obs: Dict[str, int],
+        terminated: bool,
+        alpha: Optional[float] = None
+    ) -> float:
+        """
+        Update Q-value using Double Q-learning update rule.
+        
+        With probability 0.5:
+            - Update Q1 using action selected by Q1 but evaluated by Q2
+        Otherwise:
+            - Update Q2 using action selected by Q2 but evaluated by Q1
+        
+        Args:
+            obs: Current observation
+            action: Action taken
+            reward: Reward received
+            next_obs: Next observation
+            terminated: Whether episode terminated
+            alpha: Learning rate (uses self.alpha if None)
+            
+        Returns:
+            TD error (for monitoring)
+        """
+        if alpha is None:
+            alpha = self.alpha
+        
+        state = self.get_state_tuple(obs)
+        next_state = self.get_state_tuple(next_obs)
+        
+        # Randomly choose which Q-table to update
+        if self.rng.random() < 0.5:
+            # Update Q1: use Q1 to select action, Q2 to evaluate
+            current_q = self.Q1[state][action]
+            
+            if terminated:
+                target = reward
+            else:
+                # Q1 selects best action
+                best_next_action = np.argmax(self.Q1[next_state])
+                # Q2 evaluates that action
+                next_q = self.Q2[next_state][best_next_action]
+                target = reward + self.gamma * next_q
+            
+            td_error = target - current_q
+            self.Q1[state][action] += alpha * td_error
+            
+            # Update visit count
+            self.visit_counts_q1[state][action] += 1
+            
+        else:
+            # Update Q2: use Q2 to select action, Q1 to evaluate
+            current_q = self.Q2[state][action]
+            
+            if terminated:
+                target = reward
+            else:
+                # Q2 selects best action
+                best_next_action = np.argmax(self.Q2[next_state])
+                # Q1 evaluates that action
+                next_q = self.Q1[next_state][best_next_action]
+                target = reward + self.gamma * next_q
+            
+            td_error = target - current_q
+            self.Q2[state][action] += alpha * td_error
+            
+            # Update visit count
+            self.visit_counts_q2[state][action] += 1
+        
+        # Also update parent class visit_counts for compatibility
+        self.visit_counts[state][action] += 1
+        
+        return abs(td_error)
+    
+    def get_q_tables(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get both Q-tables.
+        
+        Returns:
+            Tuple of (Q1, Q2)
+        """
+        return self.Q1, self.Q2
+    
+    def get_q_difference(self) -> np.ndarray:
+        """
+        Get the difference between Q1 and Q2.
+        Useful for analyzing estimation variance.
+        
+        Returns:
+            Absolute difference |Q1 - Q2|
+        """
+        return np.abs(self.Q1 - self.Q2)
+    
+    def get_overestimation_stats(self) -> Dict[str, float]:
+        """
+        Get statistics about Q-value differences between the two tables.
+        
+        Returns:
+            Dictionary with mean, max, and std of |Q1 - Q2|
+        """
+        diff = self.get_q_difference()
+        return {
+            'mean_diff': np.mean(diff),
+            'max_diff': np.max(diff),
+            'std_diff': np.std(diff),
+            'q1_mean': np.mean(self.Q1),
+            'q2_mean': np.mean(self.Q2)
+        }
 
 
 # Hyperparameter schedules
