@@ -104,6 +104,13 @@ class BaseStoppingEnv(gym.Env, ABC):
             self.P = self._create_random_walk_transition()
         elif self.transition_model == 'brownian':
             self.P = self._create_brownian_transition()
+        elif self.transition_model == 'up_down':
+            self.P = self._create_up_down_transition()
+        elif self.transition_model == 'custom':
+            if 'tpm' in self.transition_params:
+                self.P = self.transition_params['tpm']
+            else:
+                raise ValueError("Custom transition model requires 'tpm' in transition_params.")
         else:
             raise ValueError(f"Unknown transition model: {self.transition_model}")
         
@@ -280,7 +287,19 @@ class BaseStoppingEnv(gym.Env, ABC):
             P[i, :] /= P[i, :].sum()
         
         return P
-    
+
+    def _create_up_down_transition(self) -> np.ndarray:
+            P = np.zeros((self.n_states, self.n_states))
+            alpha = self.transition_params.get("alpha", 0.1)
+            for i in range(self.n_states):
+                for j in range(self.n_states):
+                    if j == i:
+                        P[i, j] = 1 - 2 * alpha
+                    elif j == i + 1 or j == i - 1:
+                        P[i, j] = alpha
+                P[i, :] /= np.sum(P[i, :])
+            return P
+
     def get_transition_probability(self, state_from: int, state_to: int) -> float:
         """
         Get transition probability between two states.

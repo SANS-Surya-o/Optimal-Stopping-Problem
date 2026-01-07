@@ -13,7 +13,7 @@ Examples:
 """
 from typing import Optional, Dict, Any, Tuple, List
 import numpy as np
-from base_env import BaseStoppingEnv
+from envs import BaseStoppingEnv
 
 
 class BuySellEnv(BaseStoppingEnv):

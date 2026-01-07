@@ -1042,6 +1042,28 @@ class DoubleQLearningAgent(QLearningAgent):
             'q1_mean': np.mean(self.Q1),
             'q2_mean': np.mean(self.Q2)
         }
+    
+class QOptimalBehaviourAgent(QLearningAgent):
+    def __init__(self, *args, optimal_policy: np.ndarray, **kwargs):
+        """
+        Q-Learning agent that follows a fixed optimal policy during training.
+        
+        Args:
+            optimal_policy: Precomputed optimal policy array of shape (n_states, max_time+1, max_stops+1)
+        """
+        super().__init__(*args, **kwargs)
+        self.optimal_policy = optimal_policy
+    
+    def select_action(self, obs, epsilon = None):
+        if epsilon is None:
+            epsilon = self.epsilon
+        
+        if self.rng.random() < epsilon:
+            # Explore: random action
+            return self.rng.integers(0, self.n_actions)
+        else:
+            state = self.get_state_tuple(obs)
+            return self.optimal_policy[state]
 
 
 # Hyperparameter schedules

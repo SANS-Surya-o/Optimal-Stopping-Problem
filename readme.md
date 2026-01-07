@@ -1,1 +1,1 @@
-The code for plotting is in visualiser class in test.ipynb
+This is a project at the intersection of RL and interesting problems in probability that can potentially be solved using RL. I am also just collecting interesting probability problems and storing the notes. I'm kinda interested in Mathematical Finance too (mainly cos its like a fun real world application of probability and stochastic optimisation and definitely not because I want to work in a stressful quant company lol) 

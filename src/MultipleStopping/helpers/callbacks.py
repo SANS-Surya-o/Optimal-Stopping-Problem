@@ -294,6 +294,85 @@ class MetricsTracker:
         self.update(stats)
 
 
+class PolicySnapshotCallback:
+    """
+    Callback to capture policy snapshots during training for GIF visualization.
+    Stores policy snapshots at regular intervals that can be animated.
+    """
+    
+    def __init__(
+        self,
+        snapshot_interval: int = 100,
+        max_snapshots: Optional[int] = None
+    ):
+        """
+        Initialize policy snapshot callback.
+        
+        Args:
+            snapshot_interval: How often to capture snapshots (every N episodes)
+            max_snapshots: Maximum number of snapshots to store (None = unlimited)
+        """
+        self.snapshot_interval = snapshot_interval
+        self.max_snapshots = max_snapshots
+        
+        # Storage for snapshots
+        self.snapshots: List[np.ndarray] = []
+        self.episodes: List[int] = []
+        self.rewards: List[float] = []  # Rolling average reward at snapshot time
+        
+        # For computing rolling average
+        self._recent_rewards: List[float] = []
+        self._window_size = 100
+    
+    def __call__(
+        self,
+        agent,
+        env,
+        episode: int,
+        stats: Dict[str, Any]
+    ):
+        """Called after each episode."""
+        # Track recent rewards for rolling average
+        self._recent_rewards.append(stats.get('episode_reward', 0))
+        if len(self._recent_rewards) > self._window_size:
+            self._recent_rewards.pop(0)
+        
+        # Capture snapshot at regular intervals
+        if episode % self.snapshot_interval == 0:
+            # Get current policy from agent
+            policy = agent.get_policy().copy()
+            
+            # Calculate rolling average reward
+            avg_reward = np.mean(self._recent_rewards) if self._recent_rewards else 0.0
+            
+            # Store snapshot
+            self.snapshots.append(policy)
+            self.episodes.append(episode)
+            self.rewards.append(avg_reward)
+            
+            # Limit number of snapshots if specified
+            if self.max_snapshots is not None and len(self.snapshots) > self.max_snapshots:
+                self.snapshots.pop(0)
+                self.episodes.pop(0)
+                self.rewards.pop(0)
+    
+    def get_snapshots(self) -> Tuple[List[np.ndarray], List[int], List[float]]:
+        """
+        Get all captured snapshots.
+        
+        Returns:
+            Tuple of (policies, episodes, rewards)
+        """
+        return self.snapshots, self.episodes, self.rewards
+    
+    def clear(self):
+        """Clear all stored snapshots."""
+        self.snapshots = []
+        self.episodes = []
+        self.rewards = []
+        self._recent_rewards = []
+
+
 def create_default_callbacks(
     save_dir: str = "checkpoints",
     log_dir: str = "logs",

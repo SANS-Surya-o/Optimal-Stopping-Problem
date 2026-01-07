@@ -155,6 +155,7 @@ class DQNAgent:
         self.epsilon_schedule = epsilon_schedule
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
+        self.visit_counts = np.zeros((state_dim, action_dim), dtype=np.int32)  
         
         # Set device
         if device is None:

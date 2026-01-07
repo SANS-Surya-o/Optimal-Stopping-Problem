@@ -153,37 +153,41 @@ class PolicyEvaluator:
     
     def compare_policies(
         self,
-        policy1: np.ndarray,
-        policy2: np.ndarray,
+        policies: List[np.ndarray],
+        policy_names: List[str],
         n_episodes: int = 1000,
-        policy1_name: str = "Policy 1",
-        policy2_name: str = "Policy 2",
         seed: Optional[int] = 42,
         verbose: bool = True
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    ) -> List[Dict[str, Any]]:
         """
-        Compare two policies on the environment.
+        Compare multiple policies on the environment.
         
         Args:
-            policy1: First policy array
-            policy2: Second policy array
+            policies: List of policy arrays
+            policy_names: List of names for each policy
             n_episodes: Number of episodes to evaluate each
-            policy1_name: Name for first policy
-            policy2_name: Name for second policy
             seed: Random seed for reproducibility
             verbose: Whether to show progress
             
         Returns:
-            Tuple of (results1, results2)
+            List of results dictionaries
         """
-        # Evaluate both policies with same seed for fair comparison
-        results1 = self.evaluate_policy(policy1, n_episodes, policy1_name, verbose, seed)
-        results2 = self.evaluate_policy(policy2, n_episodes, policy2_name, verbose, seed)
+        if len(policies) != len(policy_names):
+            raise ValueError(f"Number of policies ({len(policies)}) must match number of names ({len(policy_names)})")
+        
+        if len(policies) < 2:
+            raise ValueError("Need at least 2 policies to compare")
+        
+        # Evaluate all policies with same seed for fair comparison
+        all_results = []
+        for policy, name in zip(policies, policy_names):
+            results = self.evaluate_policy(policy, n_episodes, name, verbose, seed)
+            all_results.append(results)
         
         if verbose:
-            self._print_comparison(results1, results2)
+            self._print_comparison_multi(all_results)
         
-        return results1, results2
+        return all_results
     
     def _print_summary(self, results: Dict[str, Any]):
         """Print summary statistics for a policy."""
@@ -213,10 +217,18 @@ class PolicyEvaluator:
         print(f"{'='*60}\n")
     
     def _print_comparison(self, results1: Dict[str, Any], results2: Dict[str, Any]):
-        """Print comparison between two policies."""
-        print(f"\n{'='*70}")
-        print(f"Policy Comparison: {results1['policy_name']} vs {results2['policy_name']}")
-        print(f"{'='*70}")
+        """Print comparison between two policies (legacy, kept for compatibility)."""
+        self._print_comparison_multi([results1, results2])
+    
+    def _print_comparison_multi(self, all_results: List[Dict[str, Any]]):
+        """Print comparison between multiple policies."""
+        if len(all_results) < 2:
+            print("Need at least 2 policies to compare")
+            return
+        
+        print(f"\n{'='*80}")
+        print(f"Policy Comparison: {' vs '.join([r['policy_name'] for r in all_results])}")
+        print(f"{'='*80}")
         
         metrics = [
             ('Mean Reward', 'mean_reward', True),
@@ -224,88 +236,90 @@ class PolicyEvaluator:
             ('Sharpe Ratio', 'sharpe_ratio', True),
             ('Median Reward', 'median_reward', True),
             ('Mean Episode Length', 'mean_episode_length', False),
-            ('Std Episode Length', 'std_episode_length', False),
         ]
         
-        # Add buy-sell metrics only if they're meaningful
-        if not np.isnan(results1['completion_rate']) and not np.isnan(results2['completion_rate']):
-            if results1['completion_rate'] > 0 or results2['completion_rate'] > 0:
-                metrics.extend([
-                    ('Completion Rate', 'completion_rate', True),
-                    ('Mean Profit', 'mean_profit', True),
-                    ('Mean Holding Time', 'mean_holding_time', False),
-                ])
+        # Add buy-sell metrics only if they're meaningful for at least one policy
+        if any(not np.isnan(r['completion_rate']) and r['completion_rate'] > 0 for r in all_results):
+            metrics.extend([
+                ('Completion Rate', 'completion_rate', True),
+                ('Mean Profit', 'mean_profit', True),
+                ('Mean Holding Time', 'mean_holding_time', False),
+            ])
         
-        print(f"\n{'Metric':<25} {results1['policy_name'][:15]:>15} {results2['policy_name'][:15]:>15}   {'Difference':>12}   {'Winner':>10}")
-        print(f"{'-'*70}")
+        # Print header
+        header = f"{'Metric':<25}"
+        for r in all_results:
+            header += f" {r['policy_name'][:12]:>12}"
+        header += f"   {'Best':>12}"
+        print(f"\n{header}")
+        print(f"{'-'*80}")
         
+        # Print each metric
         for metric_name, metric_key, higher_better in metrics:
-            val1 = results1[metric_key]
-            val2 = results2[metric_key]
+            line = f"{metric_name:<25}"
+            values = [r[metric_key] for r in all_results]
             
-            if np.isnan(val1) or np.isnan(val2):
-                diff_str = "N/A"
-                winner = "-"
-            else:
-                diff = val2 - val1
-                diff_pct = (diff / abs(val1) * 100) if val1 != 0 else 0
-                diff_str = f"{diff:+.4f} ({diff_pct:+.1f}%)"
-                
-                if abs(diff) < 1e-6:
-                    winner = "Tie"
-                elif higher_better:
-                    winner = results2['policy_name'] if diff > 0 else results1['policy_name']
+            # Add values
+            for val in values:
+                if np.isnan(val):
+                    line += f" {'N/A':>12}"
+                elif metric_key == 'completion_rate':
+                    line += f" {val:>11.2%}"
                 else:
-                    winner = results1['policy_name'] if diff > 0 else results2['policy_name']
+                    line += f" {val:>12.4f}"
             
-            # Format values
-            if metric_key == 'completion_rate':
-                val1_str = f"{val1:.2%}"
-                val2_str = f"{val2:.2%}"
+            # Find best
+            valid_vals = [(i, v) for i, v in enumerate(values) if not np.isnan(v)]
+            if valid_vals:
+                if higher_better:
+                    best_idx = max(valid_vals, key=lambda x: x[1])[0]
+                else:
+                    best_idx = min(valid_vals, key=lambda x: x[1])[0]
+                best_name = all_results[best_idx]['policy_name'][:12]
             else:
-                val1_str = f"{val1:.4f}"
-                val2_str = f"{val2:.4f}"
+                best_name = "N/A"
             
-            print(f"{metric_name:<25} {val1_str:>15} {val2_str:>15}   {diff_str:>12}   {winner:>10}")
+            line += f"   {best_name:>12}"
+            print(line)
         
-        print(f"{'='*70}\n")
+        print(f"{'='*80}\n")
     
     def plot_comparison(
         self,
-        policy1_name: Optional[str] = None,
-        policy2_name: Optional[str] = None,
+        policy_names: Optional[List[str]] = None,
         figsize: Tuple[int, int] = (14, 8)
     ):
         """
-        Create comprehensive comparison plots between two policies.
+        Create comprehensive comparison plots between multiple policies.
         
         Args:
-            policy1_name: Name of first policy (uses most recent if None)
-            policy2_name: Name of second policy (uses most recent if None)
+            policy_names: List of policy names to compare (uses all if None)
             figsize: Figure size
         """
         if len(self.results) < 2:
-            print("⚠ Need at least 2 evaluated policies to compare")
+            print("Need at least 2 evaluated policies to compare")
             return
         
         # Get results
-        if policy1_name is None:
-            policy1_name = list(self.results.keys())[-2]
-        if policy2_name is None:
-            policy2_name = list(self.results.keys())[-1]
+        if policy_names is None:
+            policy_names = list(self.results.keys())
         
-        results1 = self.results[policy1_name]
-        results2 = self.results[policy2_name]
+        all_results = [self.results[name] for name in policy_names]
+        n_policies = len(all_results)
+        
+        # Color palette
+        colors = plt.cm.tab10(np.linspace(0, 1, n_policies))
         
         fig = plt.figure(figsize=figsize)
         gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.35)
         
         # 1. Reward distributions (histogram)
         ax1 = fig.add_subplot(gs[0, :2])
-        ax1.hist(results1['episode_rewards'], bins=50, alpha=0.6, label=policy1_name, color='blue', density=True)
-        ax1.hist(results2['episode_rewards'], bins=50, alpha=0.6, label=policy2_name, color='red', density=True)
-        ax1.axvline(results1['mean_reward'], color='blue', linestyle='--', linewidth=2, label=f"{policy1_name} mean")
-        ax1.axvline(results2['mean_reward'], color='red', linestyle='--', linewidth=2, label=f"{policy2_name} mean")
+        for idx, (results, color) in enumerate(zip(all_results, colors)):
+            ax1.hist(results['episode_rewards'], bins=50, alpha=0.5, 
+                    label=results['policy_name'], color=color, density=True)
+            ax1.axvline(results['mean_reward'], color=color, linestyle='--', 
+                       linewidth=2, alpha=0.8)
         ax1.set_xlabel('Episode Reward', fontsize=11)
         ax1.set_ylabel('Density', fontsize=11)
         ax1.set_title('Reward Distribution', fontsize=12, fontweight='bold')
@@ -314,12 +328,11 @@ class PolicyEvaluator:
         
         # 2. Cumulative reward distribution (CDF)
         ax2 = fig.add_subplot(gs[0, 2])
-        sorted_rewards1 = np.sort(results1['episode_rewards'])
-        sorted_rewards2 = np.sort(results2['episode_rewards'])
-        cdf1 = np.arange(1, len(sorted_rewards1) + 1) / len(sorted_rewards1)
-        cdf2 = np.arange(1, len(sorted_rewards2) + 1) / len(sorted_rewards2)
-        ax2.plot(sorted_rewards1, cdf1, label=policy1_name, color='blue', linewidth=2)
-        ax2.plot(sorted_rewards2, cdf2, label=policy2_name, color='red', linewidth=2)
+        for idx, (results, color) in enumerate(zip(all_results, colors)):
+            sorted_rewards = np.sort(results['episode_rewards'])
+            cdf = np.arange(1, len(sorted_rewards) + 1) / len(sorted_rewards)
+            ax2.plot(sorted_rewards, cdf, label=results['policy_name'], 
+                    color=color, linewidth=2)
         ax2.set_xlabel('Episode Reward', fontsize=11)
         ax2.set_ylabel('CDF', fontsize=11)
         ax2.set_title('Cumulative Distribution', fontsize=12, fontweight='bold')
@@ -328,10 +341,11 @@ class PolicyEvaluator:
         
         # 3. Episode length distribution
         ax3 = fig.add_subplot(gs[1, 0])
-        ax3.hist(results1['episode_lengths'], bins=30, alpha=0.6, label=policy1_name, color='blue', density=True)
-        ax3.hist(results2['episode_lengths'], bins=30, alpha=0.6, label=policy2_name, color='red', density=True)
-        ax3.axvline(results1['mean_episode_length'], color='blue', linestyle='--', linewidth=2)
-        ax3.axvline(results2['mean_episode_length'], color='red', linestyle='--', linewidth=2)
+        for idx, (results, color) in enumerate(zip(all_results, colors)):
+            ax3.hist(results['episode_lengths'], bins=30, alpha=0.5, 
+                    label=results['policy_name'], color=color, density=True)
+            ax3.axvline(results['mean_episode_length'], color=color, 
+                       linestyle='--', linewidth=2, alpha=0.8)
         ax3.set_xlabel('Episode Length', fontsize=11)
         ax3.set_ylabel('Density', fontsize=11)
         ax3.set_title('Episode Length Distribution', fontsize=12, fontweight='bold')
@@ -340,32 +354,38 @@ class PolicyEvaluator:
         
         # 4. Box plot comparison
         ax4 = fig.add_subplot(gs[1, 1])
-        box_data = [results1['episode_rewards'], results2['episode_rewards']]
-        bp = ax4.boxplot(box_data, labels=[policy1_name, policy2_name], 
-                         patch_artist=True, widths=0.6)
-        bp['boxes'][0].set_facecolor('blue')
-        bp['boxes'][0].set_alpha(0.6)
-        bp['boxes'][1].set_facecolor('red')
-        bp['boxes'][1].set_alpha(0.6)
+        box_data = [r['episode_rewards'] for r in all_results]
+        labels = [r['policy_name'] for r in all_results]
+        bp = ax4.boxplot(box_data, labels=labels, patch_artist=True, widths=0.6)
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
         ax4.set_ylabel('Episode Reward', fontsize=11)
         ax4.set_title('Reward Distribution (Box Plot)', fontsize=12, fontweight='bold')
         ax4.grid(alpha=0.3, axis='y')
+        ax4.tick_params(axis='x', rotation=15)
         
         # 5. Key metrics comparison bar chart
         ax5 = fig.add_subplot(gs[1, 2])
         metrics_names = ['Mean\nReward', 'Sharpe\nRatio', 'Mean\nLength']
-        vals1 = [results1['mean_reward'], results1['sharpe_ratio'], results1['mean_episode_length']]
-        vals2 = [results2['mean_reward'], results2['sharpe_ratio'], results2['mean_episode_length']]
-        
-        # Normalize for visualization
-        max_vals = [max(abs(v1), abs(v2)) for v1, v2 in zip(vals1, vals2)]
-        vals1_norm = [v / m if m != 0 else 0 for v, m in zip(vals1, max_vals)]
-        vals2_norm = [v / m if m != 0 else 0 for v, m in zip(vals2, max_vals)]
         
         x = np.arange(len(metrics_names))
-        width = 0.35
-        ax5.bar(x - width/2, vals1_norm, width, label=policy1_name, color='blue', alpha=0.7)
-        ax5.bar(x + width/2, vals2_norm, width, label=policy2_name, color='red', alpha=0.7)
+        width = 0.8 / n_policies
+        
+        for idx, (results, color) in enumerate(zip(all_results, colors)):
+            vals = [results['mean_reward'], results['sharpe_ratio'], 
+                   results['mean_episode_length']]
+            # Normalize for visualization
+            max_vals = [max(abs(r['mean_reward']) for r in all_results),
+                       max(abs(r['sharpe_ratio']) for r in all_results if not np.isnan(r['sharpe_ratio'])),
+                       max(abs(r['mean_episode_length']) for r in all_results)]
+            vals_norm = [v / m if m != 0 and not np.isnan(v) else 0 
+                        for v, m in zip(vals, max_vals)]
+            
+            offset = (idx - n_policies/2 + 0.5) * width
+            ax5.bar(x + offset, vals_norm, width, label=results['policy_name'], 
+                   color=color, alpha=0.7)
+        
         ax5.set_ylabel('Normalized Value', fontsize=11)
         ax5.set_title('Key Metrics Comparison', fontsize=12, fontweight='bold')
         ax5.set_xticks(x)
@@ -374,8 +394,10 @@ class PolicyEvaluator:
         ax5.grid(alpha=0.3, axis='y')
         ax5.axhline(0, color='black', linewidth=0.8)
         
-        fig.suptitle(f'Policy Comparison: {policy1_name} vs {policy2_name}', 
-                     fontsize=14, fontweight='bold', y=0.995)
+        title = f'Policy Comparison: {" vs ".join(policy_names)}'
+        if len(title) > 80:
+            title = f'Policy Comparison ({n_policies} policies)'
+        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.995)
         
         plt.show()
     
