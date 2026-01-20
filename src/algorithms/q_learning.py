@@ -239,7 +239,7 @@ class QLearningAgent:
             # Take step
             next_obs, reward, terminated, truncated, info = env.step(action)
             
-            # Update Q-value
+            # Update Q-value    
             td_error = self.update(
                 obs, action, reward, next_obs,
                 terminated or truncated,
@@ -1064,6 +1064,193 @@ class QOptimalBehaviourAgent(QLearningAgent):
         else:
             state = self.get_state_tuple(obs)
             return self.optimal_policy[state]
+        
+
+class QSuperGreedyAgent(QLearningAgent):
+    """
+    Special agent that works ONLY FOR ENVS WHERE ACTIONS DO NOT AFFECT THE STATE TRANSITIONS.
+    
+    For the buy-sell problem (max_stops=2), after observing a complete price path 
+    (generated offline), we try all possible pairs of buy-sell times and update 
+    Q-values for each combination. This is much more sample-efficient than standard 
+    Q-learning since we extract maximum information from each observed path.
+    
+    Key insight: Since actions don't affect transitions, the same path of offers would
+    occur regardless of when we choose to buy/sell. So we can simulate all possible
+    action sequences on the same observed path.
+    
+    Uses env._generate_offline_paths() to get complete paths up to max_time.
+    """
+    
+    def __init__(self, *args, holding_cost: float = 0.0, **kwargs):
+        """
+        Initialize SuperGreedyAgent.
+        
+        Args:
+            holding_cost: Holding cost per time step (extracted from env if available)
+            *args, **kwargs: Passed to parent QLearningAgent
+        """
+        super().__init__(*args, **kwargs)
+        self.holding_cost = holding_cost
+        
+        # Try to extract holding cost from env if provided
+        if 'env' in kwargs and kwargs['env'] is not None:
+            env = kwargs['env']
+            if hasattr(env, 'holding_cost_per_step'):
+                self.holding_cost = env.holding_cost_per_step
+    
+    def train_episode(
+        self,
+        env,
+        episode_num: int,
+        callbacks: Optional[List[Callable]] = None
+    ) -> Dict[str, Any]:
+        """
+        Train by generating one complete offline path and updating Q-values 
+        for ALL possible buy-sell combinations.
+        
+        This is the key efficiency gain: one path generates O(T^2) updates instead of O(T).
+        """
+        # Update hyperparameters if schedules are provided
+        if self.alpha_schedule is not None:
+            current_alpha = self.alpha_schedule(episode_num)
+        else:
+            current_alpha = self.alpha
+        
+        if self.epsilon_schedule is not None:
+            current_epsilon = self.epsilon_schedule(episode_num)
+        else:
+            current_epsilon = self.epsilon
+        
+        # Generate one complete offline path using the environment
+        env._generate_offline_paths(n_paths=1)
+        offers = env.offline_paths[0]  # List of offer indices, length = max_time
+        
+        # Convert offer indices to actual values
+        values = [env.offer_values[o] for o in offers]
+        
+        path_length = len(offers)  # Should be max_time
+        max_time = env.max_time
+        
+        td_errors = []
+        n_updates = 0
+        best_return = -np.inf
+        
+        # Try all possible buy-sell combinations
+        # buy_idx: when to buy (0 to path_length-2)
+        # sell_idx: when to sell (buy_idx+1 to path_length-1)
+        for buy_idx in range(path_length - 1):
+            for sell_idx in range(buy_idx + 1, path_length):
+                # Compute the return for this buy-sell pair (for tracking best_return)
+                buy_price = values[buy_idx]
+                sell_price = values[sell_idx]
+                holding_steps = sell_idx - buy_idx
+                total_return = sell_price - buy_price - self.holding_cost * holding_steps
+                best_return = max(best_return, total_return)
+                
+                # Convert time indices to time_left values
+                # time_idx 0 corresponds to time_left = max_time
+                buy_time_left = max_time - buy_idx
+                sell_time_left = max_time - sell_idx
+                
+                buy_offer = offers[buy_idx]
+                sell_offer = offers[sell_idx]
+                
+                # === Update Q-value for BUY action ===
+                # State: (offer, time_left, stops_left=2), Action: 1 (accept/buy)
+                buy_state = (buy_offer, buy_time_left, 2)
+                
+                # Immediate reward for buying: -buy_price - holding_cost
+                buy_reward = -values[buy_idx] - self.holding_cost
+                
+                # Next state after buying: (next_offer, time_left-1, stops_left=1)
+                next_offer_after_buy = offers[buy_idx + 1] if buy_idx + 1 < path_length else offers[buy_idx]
+                next_state_after_buy = (next_offer_after_buy, buy_time_left - 1, 1)
+                
+                # Standard Q-learning target: reward + gamma * max_Q(next_state)
+                target_buy = buy_reward + self.gamma * np.max(self.Q[next_state_after_buy])
+                
+                current_q_buy = self.Q[buy_state][1]
+                td_error_buy = target_buy - current_q_buy
+                self.Q[buy_state][1] += current_alpha * td_error_buy
+                self.visit_counts[buy_state][1] += 1
+                td_errors.append(abs(td_error_buy))
+                n_updates += 1
+                
+                # === Update Q-value for SELL action ===
+                # State: (offer, time_left, stops_left=1), Action: 1 (accept/sell)
+                sell_state = (sell_offer, sell_time_left, 1)
+                
+                # Selling gives immediate reward = sell_price, terminal (no future)
+                sell_reward = values[sell_idx]
+                target_sell = sell_reward  # Terminal state, no future value
+                
+                current_q_sell = self.Q[sell_state][1]
+                td_error_sell = target_sell - current_q_sell
+                self.Q[sell_state][1] += current_alpha * td_error_sell
+                self.visit_counts[sell_state][1] += 1
+                td_errors.append(abs(td_error_sell))
+                n_updates += 1
+                
+                # === Update Q-values for REJECT actions along the path ===
+                # Before buy: reject with stops_left=2 (no holding cost)
+                for t_idx in range(buy_idx):
+                    state = (offers[t_idx], max_time - t_idx, 2)
+                    next_state = (offers[t_idx + 1], max_time - t_idx - 1, 2)
+                    # Reject reward = 0 (not holding anything yet)
+                    target_reject = 0 + self.gamma * np.max(self.Q[next_state])
+                    
+                    current_q_reject = self.Q[state][0]
+                    td_error_reject = target_reject - current_q_reject
+                    self.Q[state][0] += current_alpha * td_error_reject
+                    self.visit_counts[state][0] += 1
+                    td_errors.append(abs(td_error_reject))
+                    n_updates += 1
+                
+                # Between buy and sell: reject with stops_left=1 (holding asset, pay holding cost)
+                for t_idx in range(buy_idx + 1, sell_idx):
+                    state = (offers[t_idx], max_time - t_idx, 1)
+                    # Reject reward = -holding_cost (we're holding the asset)
+                    reject_reward = -self.holding_cost
+                    if t_idx + 1 < path_length:
+                        next_state = (offers[t_idx + 1], max_time - t_idx - 1, 1)
+                        target_reject = reject_reward + self.gamma * np.max(self.Q[next_state])
+                    else:
+                        target_reject = reject_reward  # Terminal
+                    
+                    current_q_reject = self.Q[state][0]
+                    td_error_reject = target_reject - current_q_reject
+                    self.Q[state][0] += current_alpha * td_error_reject
+                    self.visit_counts[state][0] += 1
+                    td_errors.append(abs(td_error_reject))
+                    n_updates += 1
+        
+        # Store statistics
+        self.episode_rewards.append(best_return)
+        self.episode_lengths.append(path_length)
+        self.training_losses.append(np.mean(td_errors) if td_errors else 0.0)
+        
+        # Execute callbacks
+        if callbacks is not None:
+            for callback in callbacks:
+                callback(self, env, episode_num, {
+                    'episode_reward': best_return,
+                    'episode_length': path_length,
+                    'td_error': np.mean(td_errors) if td_errors else 0.0,
+                    'alpha': current_alpha,
+                    'epsilon': current_epsilon,
+                    'n_updates': n_updates
+                })
+        
+        return {
+            'episode_reward': best_return,
+            'episode_length': path_length,
+            'mean_td_error': np.mean(td_errors) if td_errors else 0.0,
+            'alpha': current_alpha,
+            'epsilon': current_epsilon,
+            'n_updates': n_updates
+        }
+         
 
 
 # Hyperparameter schedules

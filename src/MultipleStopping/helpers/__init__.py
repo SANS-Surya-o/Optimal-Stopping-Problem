@@ -3,7 +3,8 @@ from helpers.callbacks import (
 )
 
 from helpers.evaluator import (
-    PolicyEvaluator
+    PolicyEvaluator,
+    OnlineRegretExperiment
 )
 
 from helpers.visualizer import (
@@ -13,5 +14,6 @@ from helpers.visualizer import (
 __all__ = [
     "PolicySnapshotCallback",
     "PolicyEvaluator",
+    "OnlineRegretExperiment",
     "visualizer"
 ]

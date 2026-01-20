@@ -61,7 +61,8 @@ class BaseStoppingEnv(gym.Env, ABC):
         self.max_stops = max_stops
         self.transition_model = transition_model
         self.transition_params = transition_params or {}
-        
+        self.offline_paths = None
+
         # Set random seed
         self.np_random = np.random.default_rng(seed)
         
@@ -408,6 +409,24 @@ class BaseStoppingEnv(gym.Env, ABC):
         info = self._get_info()
         
         return observation, reward, terminated, truncated, info
+    
+
+
+    ### NOTES: A Much cleaner solution for paths would be to have a function that generates the next state given the current
+    # instead of using the tpm elements directly - this can be more easily extended to continuous state spaces.
+    def _generate_offline_paths(self, n_paths: int):
+        """Generate offline paths for batch learning."""
+        paths = []
+        for _ in range(n_paths): 
+            path = []
+            current_offer = self.np_random.choice(self.n_states, p=self.P[0])
+            for t in range(self.max_time):
+                path.append(current_offer)
+                current_offer = self.np_random.choice(
+                    self.n_states, p=self.P[current_offer]
+                )
+            paths.append(path)
+        self.offline_paths = paths
     
     def _sample_next_offer(self) -> int:
         """Sample next offer based on transition probabilities."""

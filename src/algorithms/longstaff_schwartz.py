@@ -163,6 +163,153 @@ class LongstaffSchwartzAgentBuySell:
         
         return paths
     
+    def _train_on_paths(self, paths: np.ndarray, verbose: bool = False) -> float:
+        """
+        Train the LSM policy on pre-generated paths.
+        
+        This is the same as train() but uses externally provided paths instead of
+        generating new ones. Useful for online regret experiments where we accumulate
+        paths over time and periodically retrain.
+        
+        Args:
+            paths: Array of shape (n_paths, max_time+1) with state indices
+                   OR (n_paths, max_time) - will be handled appropriately
+            verbose: Whether to show progress bars
+            
+        Returns:
+            training_time: Time taken to train
+        """
+        import time
+        start_time = time.time()
+        
+        if self.max_stops != 2:
+            raise NotImplementedError("LSM currently only supports max_stops=2 (buy-sell)")
+        
+        # Handle both (n_paths, max_time) and (n_paths, max_time+1) shapes
+        # Convention: paths[i, t] is state at step t, where time_left = max_time - t
+        # So paths should have max_time+1 columns (steps 0 to max_time)
+        n_paths = paths.shape[0]
+        if paths.shape[1] == self.max_time:
+            # Paths have max_time columns (steps 0 to max_time-1)
+            # This means time_left goes from max_time down to 1
+            # We need to adjust: time_left = max_time - t for t in [0, max_time-1]
+            path_length = self.max_time
+        elif paths.shape[1] == self.max_time + 1:
+            # Paths have max_time+1 columns (steps 0 to max_time)
+            # time_left = max_time - t for t in [0, max_time]
+            path_length = self.max_time + 1
+        else:
+            raise ValueError(f"Expected paths shape (n_paths, {self.max_time}) or (n_paths, {self.max_time+1}), got {paths.shape}")
+        
+        prices = self.offer_values[paths]  # prices[i, t] = price on path i at step t
+        
+        # Initialize policy array
+        self.policy = np.zeros((self.n_states, self.max_time + 1, self.max_stops + 1), dtype=int)
+        
+        # ============================================================
+        # PHASE 1: Solve for sell decision (stops_left=1)
+        # ============================================================
+        
+        if verbose:
+            print("Phase 1: Computing optimal SELL policy (stops_left=1)...")
+        
+        V_sell = np.zeros((n_paths, path_length))
+        sell_time = np.full(n_paths, path_length - 1)
+        
+        # Terminal condition: at last step (t = path_length - 1), time_left = max_time - (path_length - 1)
+        # For path_length = max_time: time_left = 1, must sell
+        # For path_length = max_time + 1: time_left = 0, terminal (no value)
+        last_valid_t = path_length - 1 if path_length == self.max_time else path_length - 2
+        V_sell[:, last_valid_t] = prices[:, last_valid_t]
+        
+        # Policy at time_left=1: always sell
+        for s in range(self.n_states):
+            self.policy[s, 1, 1] = 1
+        
+        # Backward induction
+        time_range = range(last_valid_t - 1, -1, -1) if not verbose else tqdm(range(last_valid_t - 1, -1, -1), desc="  Sell phase")
+        for t in time_range:
+            time_left = self.max_time - t  # Correct: at t=0, time_left=max_time
+                
+            current_states = paths[:, t]
+            immediate_sell = prices[:, t]
+            future_values = V_sell[:, t + 1].copy()
+            continuation = -self.holding_cost + future_values
+            
+            # Regression
+            X = self._basis_functions(current_states)
+            try:
+                coeffs, _, _, _ = np.linalg.lstsq(X, continuation, rcond=None)
+                self.regression_models[(1, time_left)] = coeffs
+                continuation_estimate = X @ coeffs
+            except np.linalg.LinAlgError:
+                self.regression_models[(1, time_left)] = None
+                continuation_estimate = continuation
+            
+            exercise = immediate_sell >= continuation_estimate
+            V_sell[:, t] = np.where(exercise, immediate_sell, continuation)
+            sell_time = np.where(exercise, t, sell_time)
+            
+            # Build policy
+            for s in range(self.n_states):
+                mask = current_states == s
+                if np.any(mask):
+                    self.policy[s, time_left, 1] = int(np.mean(exercise[mask]) >= 0.5)
+        
+        # ============================================================
+        # PHASE 2: Solve for buy decision (stops_left=2)
+        # ============================================================
+        
+        if verbose:
+            print("Phase 2: Computing optimal BUY policy (stops_left=2)...")
+        
+        V_buy = np.zeros((n_paths, path_length))
+        buy_time = np.full(n_paths, -1)
+        
+        # Terminal conditions
+        self.policy[:, 0, 2] = 0
+        self.policy[:, 1, 2] = 0
+        
+        # Backward induction - need time_left >= 2 to complete buy-sell
+        time_range = range(last_valid_t - 1, -1, -1) if not verbose else tqdm(range(last_valid_t - 1, -1, -1), desc="  Buy phase")
+        for t in time_range:
+            time_left = self.max_time - t
+            if time_left < 2:
+                continue
+                
+            current_states = paths[:, t]
+            buy_now_value = -prices[:, t] - self.holding_cost + V_sell[:, t + 1]
+            future_values = V_buy[:, t + 1].copy()
+            continuation = future_values
+            
+            # Regression
+            X = self._basis_functions(current_states)
+            try:
+                coeffs, _, _, _ = np.linalg.lstsq(X, continuation, rcond=None)
+                self.regression_models[(2, time_left)] = coeffs
+                continuation_estimate = X @ coeffs
+            except np.linalg.LinAlgError:
+                self.regression_models[(2, time_left)] = None
+                continuation_estimate = continuation
+            
+            exercise = buy_now_value >= continuation_estimate
+            V_buy[:, t] = np.where(exercise, buy_now_value, continuation)
+            buy_time = np.where(exercise & (buy_time < 0), t, buy_time)
+            
+            # Build policy
+            for s in range(self.n_states):
+                mask = current_states == s
+                if np.any(mask):
+                    self.policy[s, time_left, 2] = int(np.mean(exercise[mask]) >= 0.5)
+        
+        # Refine policy
+        self._refine_policy_from_regression()
+        
+        self.trained = True
+        training_time = time.time() - start_time
+        
+        return training_time
+
     def train(self, n_paths: int = 10000, seed: Optional[int] = None, verbose: bool = True) -> float:
         """
         Train the LSM policy using backward induction for buy-sell problem.

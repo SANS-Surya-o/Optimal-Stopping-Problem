@@ -4,6 +4,7 @@ from .q_learning import (QLearningAgent,
                                    QLearningAgentVanilla,
                                    QOptimalBehaviourAgent,
                                    DoubleQLearningAgent,
+                                   QSuperGreedyAgent,
                                    exponential_decay_schedule
                                    )
 from .longstaff_schwartz import LongstaffSchwartzAgentBuySell
@@ -16,6 +17,7 @@ __all__ = [
     "QLearningAgentVanilla",
     "QOptimalBehaviourAgent",
     "DoubleQLearningAgent",
+    "QSuperGreedyAgent",
     "exponential_decay_schedule",
     "LongstaffSchwartzAgentBuySell"
 ]

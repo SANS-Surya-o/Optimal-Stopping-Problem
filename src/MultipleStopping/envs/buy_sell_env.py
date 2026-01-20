@@ -210,7 +210,7 @@ class BuySellEnv(BaseStoppingEnv):
         policy = np.zeros((self.n_states, self.max_time + 1, self.max_stops + 1), dtype=int)
         P = self.P  # Transition probabilities
         cost = self.holding_cost_per_step
-        
+        Q = np.zeros((self.n_states, self.max_time + 1, self.max_stops + 1, 2))  
         # Base case: time_left = 0 (no time remaining, all forced terminal)
         for n in range(self.max_stops + 1):
             V[:, 0, n] = 0.0  # Terminal state, no value
@@ -247,7 +247,8 @@ class BuySellEnv(BaseStoppingEnv):
                 
                 # Reject: Pay holding cost and continue
                 value_reject = -cost + np.dot(P[s, :], V[:, t-1, 1])
-                
+                Q[s, t, 1, 0] = value_reject  # Q(s, t, stops=1, continue)
+                Q[s, t, 1, 1] = value_accept  # Q(s, t, stops=1, stop/sell)
                 if value_accept > value_reject:
                     V[s, t, 1] = value_accept
                     policy[s, t, 1] = 1
@@ -262,7 +263,8 @@ class BuySellEnv(BaseStoppingEnv):
                 
                 # Reject: Don't buy, no cost, continue with stops_left=2
                 value_reject = np.dot(P[s, :], V[:, t-1, 2])
-                
+                Q[s, t, 2, 0] = value_reject  # Q(s, t, stops=2, continue)
+                Q[s, t, 2, 1] = value_accept  # Q(s, t, stops=2, stop/buy)
                 if value_accept >= value_reject:
                     V[s, t, 2] = value_accept
                     policy[s, t, 2] = 1
@@ -282,4 +284,4 @@ class BuySellEnv(BaseStoppingEnv):
                 accept_rate = policy[:, 1:, n].mean()
                 print(f"  {action_type} (stop {stops_to_make}) accept rate: {accept_rate:.2%}")
         
-        return V, policy
+        return V, Q, policy

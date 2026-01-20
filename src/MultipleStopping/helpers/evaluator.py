@@ -443,3 +443,442 @@ class PolicyEvaluator:
         
         plt.tight_layout()
         plt.show()
+
+
+class OnlineRegretExperiment:
+    """
+    Track regret during online learning for Q-Learning and LSM.
+    
+    For Q-Learning: Update Q-values after each episode and track regret.
+    For LSM: Periodically retrain on accumulated paths and track regret.
+    """
+    
+    def __init__(self, env, optimal_policy: np.ndarray):
+        """
+        Args:
+            env: Environment instance
+            optimal_policy: Optimal policy from DP for regret calculation
+        """
+        self.env = env
+        self.optimal_policy = optimal_policy
+        self.results = {}
+    
+    def _run_episode_with_policy(self, policy: np.ndarray, seed: Optional[int] = None) -> Tuple[float, List]:
+        """Run episode with policy, return reward and path taken."""
+        obs, _ = self.env.reset(seed=seed)
+        total_reward = 0.0
+        path = [obs['offer']]
+        terminated = False
+        truncated = False
+        
+        while not (terminated or truncated):
+            state = (obs['offer'], obs['time_left'], obs['stops_left'])
+            action = policy[state]
+            obs, reward, terminated, truncated, _ = self.env.step(action)
+            total_reward += reward
+            path.append(obs['offer'])
+        
+        return total_reward, path
+    
+    def _get_optimal_reward(self, seed: int) -> float:
+        """Get reward from optimal policy for a given seed."""
+        reward, _ = self._run_episode_with_policy(self.optimal_policy, seed=seed)
+        return reward
+    
+    def run_qlearning_online(
+        self,
+        agent,
+        n_episodes: int,
+        name: str = "Q-Learning",
+        seed: int = 42
+    ) -> Dict[str, np.ndarray]:
+        """
+        Run Q-Learning online and track regret at each episode.
+        
+        For fair comparison with LSM, we:
+        1. Generate a deterministic path from seed
+        2. Compute optimal reward on that path
+        3. Simulate Q-learning on that path (update Q-values + get reward)
+        
+        Args:
+            agent: QLearningAgent instance (will be trained in-place)
+            n_episodes: Number of episodes
+            name: Name for results
+            seed: Random seed
+        """
+        agent_rewards = np.zeros(n_episodes)
+        optimal_rewards = np.zeros(n_episodes)
+        
+        for ep in tqdm(range(n_episodes), desc=f"Online {name}"):
+            ep_seed = seed + ep
+            
+            # Generate deterministic path
+            path = self._generate_path_from_seed(ep_seed)
+            
+            # Get optimal reward on this path
+            optimal_rewards[ep] = self._get_optimal_reward_on_path(path)
+            
+            # Get current epsilon/alpha from schedules
+            if hasattr(agent, 'epsilon_schedule') and agent.epsilon_schedule:
+                current_eps = agent.epsilon_schedule(ep)
+            else:
+                current_eps = agent.epsilon
+            if hasattr(agent, 'alpha_schedule') and agent.alpha_schedule:
+                current_alpha = agent.alpha_schedule(ep)
+            else:
+                current_alpha = agent.alpha
+            
+            # Simulate Q-learning on this specific path
+            episode_reward = self._run_qlearning_episode_on_path(
+                agent, path, current_eps, current_alpha
+            )
+            
+            agent_rewards[ep] = episode_reward
+            if hasattr(agent, 'episode_rewards'):
+                agent.episode_rewards.append(episode_reward)
+        
+        per_episode_regret = optimal_rewards - agent_rewards
+        cumulative_regret = np.cumsum(per_episode_regret)
+        
+        self.results[name] = {
+            'agent_rewards': agent_rewards,
+            'optimal_rewards': optimal_rewards,
+            'per_episode_regret': per_episode_regret,
+            'cumulative_regret': cumulative_regret
+        }
+        return self.results[name]
+    
+    def _run_qlearning_episode_on_path(
+        self, 
+        agent, 
+        path: np.ndarray, 
+        epsilon: float, 
+        alpha: float
+    ) -> float:
+        """
+        Run one Q-learning episode on a specific path.
+        Updates Q-values and returns total reward.
+        """
+        total_reward = 0.0
+        stops_left = self.env.max_stops
+        currently_holding = False
+        
+        for t in range(len(path)):
+            state = path[t]
+            time_left = self.env.max_time - t
+            
+            if stops_left <= 0 or time_left <= 0:
+                break
+            
+            # Current observation
+            obs = {'offer': state, 'time_left': time_left, 'stops_left': stops_left}
+            
+            # Select action (epsilon-greedy)
+            action = agent.select_action(obs, epsilon=epsilon)
+            
+            # Compute reward and next state
+            if action == 1:  # Stop
+                next_stop_number = self.env.max_stops - stops_left + 1
+                is_buy = (next_stop_number % 2 == 1)
+                price = self.env.offer_values[state]
+                
+                if is_buy:
+                    reward = -price - self.env.holding_cost_per_step
+                    currently_holding = True
+                else:
+                    reward = price
+                    currently_holding = False
+                stops_left -= 1
+            else:  # Continue
+                reward = -self.env.holding_cost_per_step if currently_holding else 0.0
+            
+            total_reward += reward
+            
+            # Determine next observation
+            done = (stops_left <= 0) or (t + 1 >= len(path))
+            if not done:
+                next_state = path[t + 1]
+                next_time_left = time_left - 1
+                next_obs = {'offer': next_state, 'time_left': next_time_left, 'stops_left': stops_left}
+            else:
+                next_obs = obs  # Doesn't matter, episode is done
+            
+            # Update Q-values
+            agent.update(obs, action, reward, next_obs, done, alpha=alpha)
+        
+        return total_reward
+        
+        per_episode_regret = optimal_rewards - agent_rewards
+        cumulative_regret = np.cumsum(per_episode_regret)
+        
+        self.results[name] = {
+            'agent_rewards': agent_rewards,
+            'optimal_rewards': optimal_rewards,
+            'per_episode_regret': per_episode_regret,
+            'cumulative_regret': cumulative_regret
+        }
+        return self.results[name]
+    
+    def _generate_path_from_seed(self, seed: int) -> np.ndarray:
+        """
+        Generate a single path deterministically from seed.
+        Uses the environment's transition matrix.
+        """
+        rng = np.random.default_rng(seed)
+        path = np.zeros(self.env.max_time, dtype=int)
+        path[0] = rng.integers(0, self.env.n_states)
+        for t in range(1, self.env.max_time):
+            path[t] = rng.choice(self.env.n_states, p=self.env.P[path[t-1]])
+        return path
+    
+    def _run_episode_on_path(self, policy: np.ndarray, path: np.ndarray) -> float:
+        """
+        Run policy on a specific path (simulating environment behavior).
+        
+        This allows us to evaluate policy on the exact same path used for
+        optimal reward calculation and LSM training.
+        """
+        total_reward = 0.0
+        stops_left = self.env.max_stops
+        currently_holding = False
+        
+        for t in range(len(path)):
+            state = path[t]
+            time_left = self.env.max_time - t
+            
+            if stops_left <= 0 or time_left <= 0:
+                break
+            
+            action = policy[state, time_left, stops_left]
+            
+            if action == 1:  # Stop
+                next_stop_number = self.env.max_stops - stops_left + 1
+                is_buy = (next_stop_number % 2 == 1)
+                price = self.env.offer_values[state]
+                
+                if is_buy:
+                    total_reward += -price - self.env.holding_cost_per_step
+                    currently_holding = True
+                else:
+                    total_reward += price
+                    currently_holding = False
+                stops_left -= 1
+            else:  # Continue
+                if currently_holding:
+                    total_reward += -self.env.holding_cost_per_step
+        
+        return total_reward
+    
+    def _get_optimal_reward_on_path(self, path: np.ndarray) -> float:
+        """Get optimal policy reward on a specific path."""
+        return self._run_episode_on_path(self.optimal_policy, path)
+    
+    def run_lsm_online(
+        self,
+        lsm_agent_class,
+        n_episodes: int,
+        retrain_interval: int = 50,
+        name: str = "LSM",
+        seed: int = 42,
+        **lsm_kwargs
+    ) -> Dict[str, np.ndarray]:
+        """
+        Run LSM in online setting by periodically retraining on accumulated paths.
+        
+        LSM is inherently a batch method, so we simulate "online" learning by:
+        1. Accumulating paths as episodes are observed
+        2. Periodically retraining LSM from scratch on all accumulated paths
+        3. Using the current policy to get rewards (which counts toward regret)
+        
+        Args:
+            lsm_agent_class: LongstaffSchwartzAgentBuySell class
+            n_episodes: Number of episodes
+            retrain_interval: Retrain LSM every N episodes
+            name: Name for results
+            seed: Random seed
+            **lsm_kwargs: Additional args for LSM agent
+        """
+        agent_rewards = np.zeros(n_episodes)
+        optimal_rewards = np.zeros(n_episodes)
+        
+        # Accumulated paths for LSM retraining
+        accumulated_paths = []
+        
+        # Initialize with "do nothing" policy (never stop - will get 0 reward)
+        policy = np.zeros((self.env.n_states, self.env.max_time + 1, self.env.max_stops + 1), dtype=int)
+        
+        for ep in tqdm(range(n_episodes), desc=f"Online {name}"):
+            ep_seed = seed + ep
+            
+            # Generate path for this episode
+            path = self._generate_path_from_seed(ep_seed)
+            accumulated_paths.append(path)
+            
+            # Get optimal reward on this path
+            optimal_rewards[ep] = self._get_optimal_reward_on_path(path)
+            
+            # Run agent's current policy on this path
+            agent_rewards[ep] = self._run_episode_on_path(policy, path)
+            
+            # Retrain LSM periodically on accumulated paths
+            if (ep + 1) % retrain_interval == 0 and len(accumulated_paths) >= 10:
+                lsm_agent = lsm_agent_class(env=self.env, seed=seed, **lsm_kwargs)
+                lsm_agent._train_on_paths(np.array(accumulated_paths), verbose=False)
+                policy = lsm_agent.get_policy()
+        
+        per_episode_regret = optimal_rewards - agent_rewards
+        cumulative_regret = np.cumsum(per_episode_regret)
+        
+        self.results[name] = {
+            'agent_rewards': agent_rewards,
+            'optimal_rewards': optimal_rewards,
+            'per_episode_regret': per_episode_regret,
+            'cumulative_regret': cumulative_regret
+        }
+        return self.results[name]
+    
+    def random_policy_baseline(
+        self, 
+        n_episodes: int, 
+        name: str = "Random", 
+        seed: int = 42,
+        action_prob: float = 0.5
+    ) -> Dict[str, np.ndarray]:
+        """
+        Run a random policy baseline for comparison.
+        
+        The random policy takes action=1 (stop) with probability `action_prob`
+        at each step, regardless of state. This provides a baseline to show
+        how much Q-Learning and LSM actually learn.
+        
+        Args:
+            n_episodes: Number of episodes
+            name: Name for results
+            seed: Random seed
+            action_prob: Probability of taking action=1 (stop) at each step
+            
+        Returns:
+            Results dictionary with regret tracking
+        """
+        agent_rewards = np.zeros(n_episodes)
+        optimal_rewards = np.zeros(n_episodes)
+        
+        rng = np.random.default_rng(seed + 999999)  # Different seed stream for actions
+        
+        for ep in tqdm(range(n_episodes), desc=f"Online {name}"):
+            ep_seed = seed + ep
+            
+            # Generate path for this episode
+            path = self._generate_path_from_seed(ep_seed)
+            
+            # Get optimal reward on this path
+            optimal_rewards[ep] = self._get_optimal_reward_on_path(path)
+            
+            # Run random policy on this path
+            agent_rewards[ep] = self._run_random_episode_on_path(path, rng, action_prob)
+        
+        per_episode_regret = optimal_rewards - agent_rewards
+        cumulative_regret = np.cumsum(per_episode_regret)
+        
+        self.results[name] = {
+            'agent_rewards': agent_rewards,
+            'optimal_rewards': optimal_rewards,
+            'per_episode_regret': per_episode_regret,
+            'cumulative_regret': cumulative_regret
+        }
+        return self.results[name]
+    
+    def _run_random_episode_on_path(
+        self, 
+        path: np.ndarray, 
+        rng: np.random.Generator,
+        action_prob: float = 0.5
+    ) -> float:
+        """
+        Run a random policy on a specific path.
+        Takes action=1 with probability action_prob at each step.
+        """
+        total_reward = 0.0
+        stops_left = self.env.max_stops
+        currently_holding = False
+        
+        for t in range(len(path)):
+            state = path[t]
+            time_left = self.env.max_time - t
+            
+            if stops_left <= 0 or time_left <= 0:
+                break
+            
+            # Random action
+            action = 1 if rng.random() < action_prob else 0
+            
+            if action == 1:  # Stop
+                next_stop_number = self.env.max_stops - stops_left + 1
+                is_buy = (next_stop_number % 2 == 1)
+                price = self.env.offer_values[state]
+                
+                if is_buy:
+                    total_reward += -price - self.env.holding_cost_per_step
+                    currently_holding = True
+                else:
+                    total_reward += price
+                    currently_holding = False
+                stops_left -= 1
+            else:  # Continue
+                if currently_holding:
+                    total_reward += -self.env.holding_cost_per_step
+        
+        return total_reward
+    
+    def plot_results(self, figsize: Tuple[int, int] = (14, 5)):
+        """Plot cumulative regret comparison."""
+        if not self.results:
+            print("No results to plot.")
+            return
+        
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+        colors = plt.cm.tab10(np.linspace(0, 1, len(self.results)))
+        
+        # Cumulative regret
+        ax1 = axes[0]
+        for (name, res), color in zip(self.results.items(), colors):
+            episodes = np.arange(1, len(res['cumulative_regret']) + 1)
+            ax1.plot(episodes, res['cumulative_regret'], label=name, color=color, linewidth=2)
+        ax1.set_xlabel('Episode', fontsize=12)
+        ax1.set_ylabel('Cumulative Regret', fontsize=12)
+        ax1.set_title('Cumulative Regret During Online Learning', fontsize=13, fontweight='bold')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Rolling average regret
+        ax2 = axes[1]
+        window = min(100, len(list(self.results.values())[0]['per_episode_regret']) // 10)
+        window = max(window, 1)
+        for (name, res), color in zip(self.results.items(), colors):
+            rolling = np.convolve(res['per_episode_regret'], np.ones(window)/window, mode='valid')
+            ax2.plot(np.arange(window, len(res['per_episode_regret']) + 1), rolling, 
+                    label=name, color=color, linewidth=2)
+        ax2.set_xlabel('Episode', fontsize=12)
+        ax2.set_ylabel(f'Rolling Avg Regret (window={window})', fontsize=12)
+        ax2.set_title('Per-Episode Regret (Smoothed)', fontsize=13, fontweight='bold')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def print_summary(self):
+        """Print summary of online regret results."""
+        print("\n" + "="*70)
+        print("ONLINE REGRET SUMMARY")
+        print("="*70)
+        print(f"{'Agent':<20} {'Total Regret':>15} {'Mean/Episode':>15} {'Final 100 Avg':>15}")
+        print("-"*70)
+        
+        sorted_results = sorted(self.results.items(), key=lambda x: x[1]['cumulative_regret'][-1])
+        for name, res in sorted_results:
+            total = res['cumulative_regret'][-1]
+            mean = np.mean(res['per_episode_regret'])
+            final_100 = np.mean(res['per_episode_regret'][-100:]) if len(res['per_episode_regret']) >= 100 else mean
+            print(f"{name:<20} {total:>15.2f} {mean:>15.4f} {final_100:>15.4f}")
+        print("="*70)
