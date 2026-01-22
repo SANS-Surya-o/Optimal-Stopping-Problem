@@ -67,6 +67,192 @@ class visualizer:
         plt.title('Episode Rewards over Time')
         plt.show()
 
+    def plot_optimal(self):
+        """
+        Visualize the optimal policy and value function from DP.
+        Shows buy/sell policies and V(s,t,stops) heatmaps.
+        """
+        V, Q, policy = self.env.solve_optimal_policy(verbose=False)
+        
+        # Exclude time_left=0
+        policy_view = policy[:, 1:, :]
+        V_view = V[:, 1:, :]
+        
+        max_time = policy_view.shape[1]
+        time_ticks = np.arange(0, max_time, max(1, max_time//10))
+        time_labels = np.arange(1, max_time+1, max(1, max_time//10))
+        
+        # --- Plot 1: Optimal Policies ---
+        fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Optimal Policy (from DP)', fontsize=14, fontweight='bold')
+        
+        # Buy policy (stops_left=2)
+        im1 = axs[0].imshow(policy_view[:, :, 2], cmap='RdYlGn', vmin=0, vmax=1, 
+                           aspect='auto', origin='lower')
+        axs[0].set_xlabel('Time Left', fontsize=11)
+        axs[0].set_ylabel('Offer Value Index', fontsize=11)
+        axs[0].set_title(f'Buy Policy (stops_left=2)\nAccept Rate: {policy_view[:,:,2].mean():.1%}', 
+                        fontsize=11, fontweight='bold')
+        axs[0].set_xticks(time_ticks)
+        axs[0].set_xticklabels(time_labels)
+        cbar1 = plt.colorbar(im1, ax=axs[0], orientation='vertical', pad=0.02)
+        cbar1.set_ticks([0, 1])
+        cbar1.set_ticklabels(['Reject', 'Accept'])
+        
+        # Sell policy (stops_left=1)
+        im2 = axs[1].imshow(policy_view[:, :, 1], cmap='RdYlGn', vmin=0, vmax=1, 
+                           aspect='auto', origin='lower')
+        axs[1].set_xlabel('Time Left', fontsize=11)
+        axs[1].set_ylabel('Offer Value Index', fontsize=11)
+        axs[1].set_title(f'Sell Policy (stops_left=1)\nAccept Rate: {policy_view[:,:,1].mean():.1%}', 
+                        fontsize=11, fontweight='bold')
+        axs[1].set_xticks(time_ticks)
+        axs[1].set_xticklabels(time_labels)
+        cbar2 = plt.colorbar(im2, ax=axs[1], orientation='vertical', pad=0.02)
+        cbar2.set_ticks([0, 1])
+        cbar2.set_ticklabels(['Reject', 'Accept'])
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # --- Plot 2: Value Functions ---
+        fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Optimal Value Function V(s, t, stops)', fontsize=14, fontweight='bold')
+        
+        # V for stops_left=2 (before buying)
+        im1 = axs[0].imshow(V_view[:, :, 2], cmap='viridis', aspect='auto', origin='lower')
+        axs[0].set_xlabel('Time Left', fontsize=11)
+        axs[0].set_ylabel('Offer Value Index', fontsize=11)
+        axs[0].set_title('V(s, t, stops=2) - Before Buying', fontsize=11, fontweight='bold')
+        axs[0].set_xticks(time_ticks)
+        axs[0].set_xticklabels(time_labels)
+        plt.colorbar(im1, ax=axs[0], label='Value')
+        
+        # V for stops_left=1 (holding, before selling)
+        im2 = axs[1].imshow(V_view[:, :, 1], cmap='viridis', aspect='auto', origin='lower')
+        axs[1].set_xlabel('Time Left', fontsize=11)
+        axs[1].set_ylabel('Offer Value Index', fontsize=11)
+        axs[1].set_title('V(s, t, stops=1) - Holding (Before Selling)', fontsize=11, fontweight='bold')
+        axs[1].set_xticks(time_ticks)
+        axs[1].set_xticklabels(time_labels)
+        plt.colorbar(im2, ax=axs[1], label='Value')
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Print summary
+        print(f"\nOptimal Value Function Summary:")
+        print(f"  V(s, max_time, 2) range: [{V[:, -1, 2].min():.2f}, {V[:, -1, 2].max():.2f}]")
+        print(f"  V(s, max_time, 1) range: [{V[:, -1, 1].min():.2f}, {V[:, -1, 1].max():.2f}]")
+        print(f"  Expected value at start (avg over states): {V[:, -1, 2].mean():.4f}")
+
+    def plot_value_function(self, V: Optional[np.ndarray] = None):
+        """
+        Plot the value function V(s, t, stops) as heatmaps.
+        
+        Args:
+            V: Value function array of shape (n_states, max_time+1, max_stops+1).
+               If None, computes optimal V from DP.
+        """
+        if V is None:
+            V, _, _ = self.env.solve_optimal_policy(verbose=False)
+        
+        # Exclude time_left=0
+        V_view = V[:, 1:, :]
+        
+        max_time = V_view.shape[1]
+        time_ticks = np.arange(0, max_time, max(1, max_time//10))
+        time_labels = np.arange(1, max_time+1, max(1, max_time//10))
+        
+        # Common color scale
+        vmin = V_view[:, :, 1:].min()
+        vmax = V_view[:, :, 1:].max()
+        
+        fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Value Function V(s, t, stops)', fontsize=14, fontweight='bold')
+        
+        # V for stops_left=2
+        im1 = axs[0].imshow(V_view[:, :, 2], cmap='viridis', aspect='auto', origin='lower',
+                           vmin=vmin, vmax=vmax)
+        axs[0].set_xlabel('Time Left', fontsize=11)
+        axs[0].set_ylabel('Offer Value Index', fontsize=11)
+        axs[0].set_title('V(s, t, stops=2)\nBefore Buying', fontsize=11, fontweight='bold')
+        axs[0].set_xticks(time_ticks)
+        axs[0].set_xticklabels(time_labels)
+        plt.colorbar(im1, ax=axs[0], label='Value')
+        
+        # V for stops_left=1
+        im2 = axs[1].imshow(V_view[:, :, 1], cmap='viridis', aspect='auto', origin='lower',
+                           vmin=vmin, vmax=vmax)
+        axs[1].set_xlabel('Time Left', fontsize=11)
+        axs[1].set_ylabel('Offer Value Index', fontsize=11)
+        axs[1].set_title('V(s, t, stops=1)\nHolding (Before Selling)', fontsize=11, fontweight='bold')
+        axs[1].set_xticks(time_ticks)
+        axs[1].set_xticklabels(time_labels)
+        plt.colorbar(im2, ax=axs[1], label='Value')
+        
+        plt.tight_layout()
+        plt.show()
+
+    def plot_Q_values(self, Q: Optional[np.ndarray] = None):
+        """
+        Plot Q-values Q(s, t, stops, action) as heatmaps.
+        
+        Args:
+            Q: Q-value array of shape (n_states, max_time+1, max_stops+1, 2).
+               If None, computes optimal Q from DP.
+        """
+        if Q is None:
+            _, Q, _ = self.env.solve_optimal_policy(verbose=False)
+        
+        # Exclude time_left=0
+        Q_view = Q[:, 1:, :, :]
+        
+        max_time = Q_view.shape[1]
+        time_ticks = np.arange(0, max_time, max(1, max_time//10))
+        time_labels = np.arange(1, max_time+1, max(1, max_time//10))
+        
+        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('Optimal Q(s, t, stops, action)', fontsize=14, fontweight='bold')
+        
+        # Row 0: Buy phase (stops_left=2)
+        im1 = axs[0, 0].imshow(Q_view[:, :, 2, 0], cmap='viridis', aspect='auto', origin='lower')
+        axs[0, 0].set_title('Q(s, t, stops=2, continue)', fontsize=11, fontweight='bold')
+        axs[0, 0].set_xlabel('Time Left')
+        axs[0, 0].set_ylabel('State')
+        axs[0, 0].set_xticks(time_ticks)
+        axs[0, 0].set_xticklabels(time_labels)
+        plt.colorbar(im1, ax=axs[0, 0])
+        
+        im2 = axs[0, 1].imshow(Q_view[:, :, 2, 1], cmap='viridis', aspect='auto', origin='lower')
+        axs[0, 1].set_title('Q(s, t, stops=2, buy)', fontsize=11, fontweight='bold')
+        axs[0, 1].set_xlabel('Time Left')
+        axs[0, 1].set_ylabel('State')
+        axs[0, 1].set_xticks(time_ticks)
+        axs[0, 1].set_xticklabels(time_labels)
+        plt.colorbar(im2, ax=axs[0, 1])
+        
+        # Row 1: Sell phase (stops_left=1)
+        im3 = axs[1, 0].imshow(Q_view[:, :, 1, 0], cmap='viridis', aspect='auto', origin='lower')
+        axs[1, 0].set_title('Q(s, t, stops=1, continue)', fontsize=11, fontweight='bold')
+        axs[1, 0].set_xlabel('Time Left')
+        axs[1, 0].set_ylabel('State')
+        axs[1, 0].set_xticks(time_ticks)
+        axs[1, 0].set_xticklabels(time_labels)
+        plt.colorbar(im3, ax=axs[1, 0])
+        
+        im4 = axs[1, 1].imshow(Q_view[:, :, 1, 1], cmap='viridis', aspect='auto', origin='lower')
+        axs[1, 1].set_title('Q(s, t, stops=1, sell)', fontsize=11, fontweight='bold')
+        axs[1, 1].set_xlabel('Time Left')
+        axs[1, 1].set_ylabel('State')
+        axs[1, 1].set_xticks(time_ticks)
+        axs[1, 1].set_xticklabels(time_labels)
+        plt.colorbar(im4, ax=axs[1, 1])
+        
+        plt.tight_layout()
+        plt.show()
+
+
     def visualise_Q_table(self):
         Q_table = self.agent.Q
         # Exclude time_left=0 by slicing from index 1
