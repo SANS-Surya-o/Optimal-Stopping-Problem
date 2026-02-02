@@ -8,6 +8,7 @@ from .q_learning import (QLearningAgent,
                                    exponential_decay_schedule
                                    )
 from .longstaff_schwartz import LongstaffSchwartzAgentBuySell
+from .model_based import ModelBasedAgent
 
 __all__ = [
     "DQNAgent",
@@ -19,5 +20,6 @@ __all__ = [
     "DoubleQLearningAgent",
     "QSuperGreedyAgent",
     "exponential_decay_schedule",
-    "LongstaffSchwartzAgentBuySell"
+    "LongstaffSchwartzAgentBuySell",
+    "ModelBasedAgent"
 ]
