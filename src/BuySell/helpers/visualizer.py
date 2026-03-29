@@ -477,7 +477,7 @@ class visualizer:
         print(f"\nOverall Policy Agreement: {total_agreement:.2%}")
         print("="*60)
     
-    def pipeline(self, compare_optimal=True):
+    def     pipeline(self, compare_optimal=True):
         self.plot_visit_counts()
         self.plot_episode_rewards()
         self.visualise_Q_table()
